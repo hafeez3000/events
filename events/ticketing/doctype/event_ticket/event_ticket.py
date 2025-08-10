@@ -20,6 +20,7 @@ class EventTicket(Document):
 
 		add_ons: DF.Table[TicketAddonValue]
 		amended_from: DF.Link | None
+		attendee_email: DF.Data | None
 		attendee_name: DF.Data
 		booking: DF.Link | None
 		event: DF.Link | None
@@ -28,7 +29,6 @@ class EventTicket(Document):
 	# end: auto-generated types
 
 	def before_submit(self):
-		self.validate_tickets_available()
 		self.generate_qr_code()
 
 	def validate_tickets_available(self):
