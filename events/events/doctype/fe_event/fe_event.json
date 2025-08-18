@@ -223,7 +223,7 @@
   },
   {
    "group": "Proposals",
-   "link_doctype": "Sponsorship Proposal",
+   "link_doctype": "Sponsorship Enquiry",
    "link_fieldname": "event"
   },
   {
@@ -240,9 +240,14 @@
    "group": "General",
    "link_doctype": "Event Check In",
    "link_fieldname": "event"
+  },
+  {
+   "group": "Ticketing",
+   "link_doctype": "Bulk Ticket Coupon",
+   "link_fieldname": "event"
   }
  ],
- "modified": "2025-08-09 11:27:16.310547",
+ "modified": "2025-08-14 17:31:17.517873",
  "modified_by": "Administrator",
  "module": "Events",
  "name": "FE Event",

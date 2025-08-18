@@ -5,7 +5,7 @@
 from frappe.model.document import Document
 
 
-class SponsorshipProposal(Document):
+class EventFeedback(Document):
 	# begin: auto-generated types
 	# This code is auto-generated. Do not modify anything in this block.
 
@@ -14,11 +14,8 @@ class SponsorshipProposal(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
-		company_logo: DF.AttachImage
-		company_name: DF.Data
 		event: DF.Link
-		status: DF.Literal["Review Pending", "Accepted", "Rejected", "Withdrawn"]
-		tier: DF.Link
+		how_can_we_improve: DF.SmallText | None
 	# end: auto-generated types
 
 	pass
