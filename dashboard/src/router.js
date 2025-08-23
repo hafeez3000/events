@@ -27,6 +27,18 @@ const routes = [
 		props: true,
 	},
 	{
+		path: "/tickets",
+		redirect: "/account/tickets",
+	},
+	{
+		path: "/tickets/:ticketId",
+		redirect: (to) => ({
+			name: "ticket-details",
+			params: { ticketId: to.params.ticketId },
+		}),
+		props: true,
+	},
+	{
 		path: "/account",
 		component: () => import("@/pages/Account.vue"),
 		redirect: { name: "profile" },
@@ -47,6 +59,28 @@ const routes = [
 				props: true,
 				name: "booking-details",
 				component: () => import("@/pages/BookingDetails.vue"),
+			},
+			{
+				path: "tickets",
+				name: "tickets-list",
+				component: () => import("@/pages/TicketsList.vue"),
+			},
+			{
+				path: "tickets/:ticketId",
+				props: true,
+				name: "ticket-details",
+				component: () => import("@/pages/TicketDetails.vue"),
+			},
+			{
+				path: "sponsorships",
+				name: "sponsorships-list",
+				component: () => import("@/pages/SponsorshipsList.vue"),
+			},
+			{
+				path: "sponsorships/:enquiryId",
+				props: true,
+				name: "sponsorship-details",
+				component: () => import("@/pages/SponsorshipDetails.vue"),
 			},
 		],
 	},

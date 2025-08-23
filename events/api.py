@@ -4,13 +4,9 @@ from frappe.utils import days_diff, format_date, format_time, today
 from events.payments import get_payment_link_for_booking
 
 
-def is_ticket_transfer_allowed(event_id: str) -> bool:
+def is_ticket_transfer_allowed(event_id: str | int) -> bool:
 	"""Check if ticket transfer is allowed based on event start date and settings."""
 	try:
-		# Validate event exists
-		if not frappe.db.exists("FE Event", event_id):
-			return False
-
 		# Get event details
 		event = frappe.get_cached_doc("FE Event", event_id)
 
@@ -36,21 +32,80 @@ def is_ticket_transfer_allowed(event_id: str) -> bool:
 		return False
 
 
+def is_add_on_change_allowed(event_id: str | int) -> bool:
+	"""Check if add-on changes are allowed based on event start date and settings."""
+	try:
+		# Get event details
+		event = frappe.get_cached_doc("FE Event", event_id)
+
+		# Get event management settings
+		settings = frappe.get_cached_doc("Event Management Settings")
+
+		# Default to 7 days if no setting is found
+		add_on_change_cutoff_days = settings.get("allow_add_ons_change_before_event_start_days", 7)
+
+		# Calculate days difference between today and event start date
+		event_start_date = event.start_date
+		if not event_start_date:
+			return False
+
+		# Get days remaining until event starts
+		days_until_event = days_diff(event_start_date, today())
+
+		# Add-on changes are allowed if there are more days remaining than the cutoff
+		return days_until_event >= add_on_change_cutoff_days
+
+	except Exception as e:
+		frappe.log_error(f"Error checking add-on change eligibility: {e!s}")
+		return False
+
+
 @frappe.whitelist()
-def can_transfer_ticket(event_id: str) -> dict:
+def can_transfer_ticket(event_id: str | int) -> dict:
 	"""API endpoint to check if ticket transfer is allowed for an event."""
 	return {"can_transfer": is_ticket_transfer_allowed(event_id), "event_id": event_id}
 
 
 @frappe.whitelist()
-def get_transfer_settings() -> dict:
-	"""Get ticket transfer settings."""
-	settings = frappe.get_single("Event Management Settings")
-	return {
-		"allow_transfer_ticket_before_event_start_days": settings.get(
-			"allow_transfer_ticket_before_event_start_days", 7
+def can_change_add_ons(event_id: str | int) -> dict:
+	"""API endpoint to check if add-on changes are allowed for an event."""
+	return {"can_change_add_ons": is_add_on_change_allowed(event_id), "event_id": event_id}
+
+
+def is_cancellation_request_allowed(event_id: str | int) -> bool:
+	"""Check if cancellation request is allowed based on event start date and settings."""
+	try:
+		# Get event details
+		event = frappe.get_cached_doc("FE Event", event_id)
+
+		# Get event management settings
+		settings = frappe.get_cached_doc("Event Management Settings")
+
+		# Default to 7 days if no setting is found
+		cancellation_cutoff_days = settings.get(
+			"allow_ticket_cancellation_request_before_event_start_days", 7
 		)
-	}
+
+		# Calculate days difference between today and event start date
+		event_start_date = event.start_date
+		if not event_start_date:
+			return False
+
+		# Get days remaining until event starts
+		days_until_event = days_diff(event_start_date, today())
+
+		# Cancellation request is allowed if there are more days remaining than the cutoff
+		return days_until_event >= cancellation_cutoff_days
+
+	except Exception as e:
+		frappe.log_error(f"Error checking cancellation request eligibility: {e!s}")
+		return False
+
+
+@frappe.whitelist()
+def can_request_cancellation(event_id: str | int) -> dict:
+	"""API endpoint to check if cancellation request is allowed for an event."""
+	return {"can_request_cancellation": is_cancellation_request_allowed(event_id), "event_id": event_id}
 
 
 @frappe.whitelist()
@@ -81,6 +136,14 @@ def get_event_booking_data(event_route: str) -> dict:
 			add_on.options = add_on.options.split("\n")
 
 	data.available_add_ons = add_ons
+
+	# GST Settings
+	event_settings = frappe.get_cached_doc("Event Management Settings")
+	data.gst_settings = {
+		"apply_gst_on_bookings": event_settings.apply_gst_on_bookings,
+		"gst_percentage": event_settings.gst_percentage or 18,
+	}
+
 	return data
 
 
@@ -219,3 +282,373 @@ def send_ticket_transfer_emails(ticket_id: str, old_name: str, old_email: str, n
 	except Exception as e:
 		frappe.log_error(f"Failed to send ticket transfer emails for ticket {ticket_id}: {e!s}")
 		# Don't raise the exception to avoid failing the main transfer process
+
+
+@frappe.whitelist()
+def get_booking_details(booking_id: str) -> dict:
+	"""Get detailed information about a specific booking."""
+	details = frappe._dict()
+	booking_doc = frappe.get_cached_doc("Event Booking", booking_id)
+	details.doc = booking_doc
+
+	tickets = frappe.db.get_all(
+		"Event Ticket",
+		filters={"booking": booking_id},
+		fields=[
+			"name",
+			"attendee_name",
+			"attendee_email",
+			"ticket_type.title as ticket_type",
+			"qr_code",
+			"event",
+		],
+	)
+
+	add_ons = frappe.db.get_all(
+		"Ticket Add-on Value",
+		filters={"parent": ("in", (ticket.name for ticket in tickets))},
+		fields=["parent", "name", "add_on", "value", "add_on.title as add_on_title"],
+	)
+
+	# Get available options for add-ons
+	event_add_ons = frappe.db.get_all(
+		"Ticket Add-on",
+		filters={"event": booking_doc.event, "user_selects_option": True},
+		fields=["name", "title", "user_selects_option", "options"],
+	)
+
+	add_on_options_map = {}
+	for event_add_on in event_add_ons:
+		if event_add_on.user_selects_option:
+			add_on_options_map[event_add_on.name] = (
+				event_add_on.options.split("\n") if event_add_on.options else []
+			)
+
+	for ticket in tickets:
+		ticket.add_ons = []
+		for add_on in add_ons:
+			if add_on.parent == ticket.name:
+				add_on_data = {
+					"id": add_on.name,
+					"name": add_on.add_on,
+					"title": add_on.add_on_title,
+					"value": add_on.value,
+					"options": add_on_options_map.get(add_on.add_on, []),
+				}
+				ticket.add_ons.append(add_on_data)
+		ticket.add_ons = sorted(ticket.add_ons, key=lambda x: x["title"])
+
+	details.tickets = tickets
+	details.event = frappe.get_cached_doc("FE Event", booking_doc.event)
+	details.can_transfer_ticket = can_transfer_ticket(details.event.name)
+	details.can_change_add_ons = can_change_add_ons(details.event.name)
+	details.can_request_cancellation = can_request_cancellation(details.event.name)
+
+	# Check for existing cancellation request
+	existing_cancellation = frappe.db.get_value(
+		"Ticket Cancellation Request",
+		{"booking": booking_id},
+		["name", "cancel_full_booking", "creation"],
+		as_dict=True,
+	)
+	details.cancellation_request = existing_cancellation
+
+	# If there's a cancellation request, determine which tickets are cancelled
+	if existing_cancellation:
+		if existing_cancellation.cancel_full_booking:
+			# If full booking cancellation, all tickets are considered cancelled
+			details.cancelled_tickets = [ticket.name for ticket in tickets]
+		else:
+			# If partial cancellation, get specific tickets
+			cancelled_tickets = frappe.db.get_all(
+				"Ticket Cancellation Item", filters={"parent": existing_cancellation.name}, fields=["ticket"]
+			)
+			details.cancelled_tickets = [item.ticket for item in cancelled_tickets]
+	else:
+		details.cancelled_tickets = []
+
+	return details
+
+
+@frappe.whitelist()
+def change_add_on_preference(add_on_id: str, new_value: str):
+	"""Change the preference value for a ticket add-on."""
+	# Validate that the add-on value exists
+	if not frappe.db.exists("Ticket Add-on Value", add_on_id):
+		frappe.throw(frappe._("Add-on value not found."))
+
+	# Get the add-on value to find the associated ticket and event
+	add_on_value = frappe.get_cached_doc("Ticket Add-on Value", add_on_id)
+
+	# Get the ticket to find the event
+	ticket = frappe.get_cached_doc("Event Ticket", add_on_value.parent)
+
+	# Check if add-on changes are allowed for this event
+	if not is_add_on_change_allowed(ticket.event):
+		frappe.throw(
+			frappe._(
+				"Add-on changes are not allowed at this time. The change window has closed as the event is approaching."
+			)
+		)
+
+	frappe.db.set_value(
+		"Ticket Add-on Value",
+		add_on_id,
+		"value",
+		new_value,
+	)
+
+
+@frappe.whitelist()
+def get_sponsorship_details(enquiry_id: str) -> dict:
+	"""Get detailed information about a sponsorship enquiry including event and sponsor details."""
+	# Get the sponsorship enquiry
+	enquiry = frappe.get_doc("Sponsorship Enquiry", enquiry_id)
+
+	# Check if user has permission to view this enquiry
+	if enquiry.owner != frappe.session.user and not frappe.has_permission(
+		"Sponsorship Enquiry", "read", enquiry
+	):
+		frappe.throw(frappe._("Not permitted to view this sponsorship enquiry"))
+
+	# Get tier title if tier exists
+	tier_title = ""
+	if enquiry.tier:
+		tier_title = frappe.db.get_value("Sponsorship Tier", enquiry.tier, "title") or enquiry.tier
+
+	# Get event details
+	event_details = {}
+	if enquiry.event:
+		event = frappe.get_cached_doc("FE Event", enquiry.event)
+		event_details = {
+			"title": event.title,
+			"short_description": getattr(event, "short_description", ""),
+			"about": getattr(event, "about", ""),
+			"start_date": event.start_date,
+			"end_date": getattr(event, "end_date", ""),
+			"venue": getattr(event, "venue", ""),
+			"route": getattr(event, "route", ""),
+		}
+
+	# Check if there's a corresponding Event Sponsor
+	sponsor_details = None
+	sponsors = frappe.db.get_all(
+		"Event Sponsor",
+		filters={"enquiry": enquiry_id},
+		fields=["name", "company_name", "company_logo", "creation", "event", "tier"],
+		limit=1,
+	)
+
+	if sponsors:
+		sponsor_details = sponsors[0]
+		# Get sponsor tier title too
+		if sponsor_details.get("tier"):
+			sponsor_tier_title = frappe.db.get_value("Sponsorship Tier", sponsor_details["tier"], "title")
+			sponsor_details["tier_title"] = sponsor_tier_title or sponsor_details["tier"]
+
+	return {
+		"enquiry": {
+			"name": enquiry.name,
+			"company_name": enquiry.company_name,
+			"company_logo": enquiry.company_logo,
+			"event": enquiry.event,
+			"tier": enquiry.tier,
+			"tier_title": tier_title,
+			"status": enquiry.status,
+			"creation": enquiry.creation,
+			"owner": enquiry.owner,
+		},
+		"event_details": event_details,
+		"sponsor_details": sponsor_details,
+		"has_sponsor": bool(sponsor_details),
+	}
+
+
+@frappe.whitelist()
+def get_user_sponsorship_inquiries() -> list:
+	"""Get all sponsorship inquiries for the current user."""
+	inquiries = frappe.db.get_all(
+		"Sponsorship Enquiry",
+		filters={"owner": frappe.session.user},
+		fields=["name", "company_name", "event", "tier", "status", "creation"],
+		order_by="creation desc",
+	)
+
+	# Get event titles and tier titles
+	for inquiry in inquiries:
+		if inquiry.event:
+			event_title = frappe.db.get_value("FE Event", inquiry.event, "title")
+			inquiry["event_title"] = event_title
+
+		if inquiry.tier:
+			tier_title = frappe.db.get_value("Sponsorship Tier", inquiry.tier, "title")
+			inquiry["tier_title"] = tier_title or inquiry.tier
+		else:
+			inquiry["tier_title"] = ""
+
+	# Check which inquiries have corresponding sponsors
+	inquiry_names = [inquiry.name for inquiry in inquiries]
+	if inquiry_names:
+		sponsors = frappe.db.get_all(
+			"Event Sponsor",
+			filters={"enquiry": ["in", inquiry_names]},
+			fields=["enquiry"],
+		)
+		sponsored_inquiries = {sponsor.enquiry for sponsor in sponsors}
+
+		for inquiry in inquiries:
+			inquiry["has_sponsor"] = inquiry.name in sponsored_inquiries
+	else:
+		for inquiry in inquiries:
+			inquiry["has_sponsor"] = False
+
+	return inquiries
+
+
+@frappe.whitelist()
+def create_sponsorship_payment_link(enquiry_id: str, tier_id: str) -> str:
+	"""Create a payment link for a sponsorship enquiry with selected tier."""
+	from events.payments import get_payment_link_for_sponsorship
+
+	# Verify the enquiry belongs to the current user
+	enquiry = frappe.get_doc("Sponsorship Enquiry", enquiry_id)
+	if enquiry.owner != frappe.session.user:
+		frappe.throw(frappe._("Not permitted to create payment for this enquiry"))
+
+	# Create payment link
+	redirect_url = f"/dashboard/account/sponsorships/{enquiry_id}?success=true"
+	return get_payment_link_for_sponsorship(enquiry_id, tier_id, redirect_url)
+
+
+@frappe.whitelist()
+def withdraw_sponsorship_enquiry(enquiry_id: str):
+	"""Withdraw a sponsorship enquiry if it's not paid yet."""
+	# Verify the enquiry exists and belongs to the current user
+	enquiry = frappe.get_cached_doc("Sponsorship Enquiry", enquiry_id)
+	if enquiry.owner != frappe.session.user:
+		frappe.throw(frappe._("Not permitted to withdraw this enquiry"))
+
+	# Check if the enquiry can be withdrawn (not paid)
+	if enquiry.status == "Paid":
+		frappe.throw(frappe._("Cannot withdraw a paid sponsorship enquiry"))
+
+	if enquiry.status == "Withdrawn":
+		frappe.throw(frappe._("This sponsorship enquiry has already been withdrawn"))
+
+	# Update status to withdrawn
+	enquiry.status = "Withdrawn"
+	enquiry.save(ignore_permissions=True)
+
+
+@frappe.whitelist()
+def get_ticket_details(ticket_id: str) -> dict:
+	"""Get detailed information about a specific ticket."""
+	details = frappe._dict()
+	ticket_doc = frappe.get_cached_doc("Event Ticket", ticket_id)
+
+	if frappe.session.user != "Administrator":
+		# Verify the ticket belongs to the current user
+		if ticket_doc.attendee_email != frappe.session.user:
+			frappe.throw(frappe._("Not permitted to view this ticket"))
+
+	details.doc = ticket_doc
+
+	# Get add-ons with their details
+	add_ons = frappe.db.get_all(
+		"Ticket Add-on Value",
+		filters={"parent": ticket_id},
+		fields=["name", "add_on", "add_on.title as add_on_title", "value", "price", "currency"],
+	)
+
+	# Get available options for add-ons (for preference management)
+	event_add_ons = frappe.db.get_all(
+		"Ticket Add-on",
+		filters={"event": ticket_doc.event, "user_selects_option": True},
+		fields=["name", "title", "user_selects_option", "options"],
+	)
+
+	add_on_options_map = {}
+	for event_add_on in event_add_ons:
+		if event_add_on.user_selects_option:
+			add_on_options_map[event_add_on.name] = (
+				event_add_on.options.split("\n") if event_add_on.options else []
+			)
+
+	# Enhance add-ons data with options
+	enhanced_add_ons = []
+	for add_on in add_ons:
+		add_on_data = {
+			"id": add_on.name,
+			"name": add_on.add_on,
+			"title": add_on.add_on_title,
+			"value": add_on.value,
+			"price": add_on.price,
+			"currency": add_on.currency,
+			"options": add_on_options_map.get(add_on.add_on, []),
+		}
+		enhanced_add_ons.append(add_on_data)
+
+	details.add_ons = enhanced_add_ons
+	details.event = frappe.get_cached_doc("FE Event", ticket_doc.event)
+
+	# Only include booking information if the current user is the owner of the booking
+	booking_doc = None
+	if ticket_doc.booking:
+		booking_doc = frappe.get_cached_doc("Event Booking", ticket_doc.booking)
+		# Check if current user is the owner of the booking
+		if booking_doc.owner == frappe.session.user:
+			details.booking = booking_doc
+		else:
+			details.booking = None
+	else:
+		details.booking = None
+
+	details.ticket_type = frappe.get_cached_doc("Event Ticket Type", ticket_doc.ticket_type)
+	details.can_transfer_ticket = (
+		can_transfer_ticket(details.event.name) if details.event else {"can_transfer": False}
+	)
+	details.can_change_add_ons = (
+		can_change_add_ons(details.event.name) if details.event else {"can_change_add_ons": False}
+	)
+	details.can_request_cancellation = (
+		can_request_cancellation(details.event.name) if details.event else {"can_request_cancellation": False}
+	)
+
+	return details
+
+
+@frappe.whitelist()
+def create_cancellation_request(booking_id: str, ticket_ids: list | None = None) -> dict:
+	"""Create a cancellation request for a booking and optionally specific tickets."""
+	# Get booking details
+	booking_doc = frappe.get_cached_doc("Event Booking", booking_id)
+
+	# Check if cancellation request is allowed for this event
+	if not is_cancellation_request_allowed(booking_doc.event):
+		frappe.throw("Cancellation requests are no longer allowed for this event.")
+
+	# Check if a cancellation request already exists for this booking
+	existing_request = frappe.db.exists("Ticket Cancellation Request", {"booking": booking_id})
+	if existing_request:
+		frappe.throw("A cancellation request already exists for this booking.")
+
+	# Determine if this is a full booking cancellation
+	all_tickets = frappe.db.get_all("Event Ticket", filters={"booking": booking_id}, fields=["name"])
+	cancel_full_booking = not ticket_ids or len(ticket_ids) == len(all_tickets)
+
+	# Create the cancellation request
+	cancellation_request = frappe.new_doc("Ticket Cancellation Request")
+	cancellation_request.booking = booking_id
+	cancellation_request.cancel_full_booking = cancel_full_booking
+
+	# If not full booking cancellation, add specific tickets to the child table
+	if not cancel_full_booking and ticket_ids:
+		for ticket_id in ticket_ids:
+			# Verify ticket belongs to this booking
+			ticket_booking = frappe.db.get_value("Event Ticket", ticket_id, "booking")
+			if ticket_booking != booking_id:
+				frappe.throw(f"Ticket {ticket_id} does not belong to booking {booking_id}")
+
+			cancellation_request.append("tickets", {"ticket": ticket_id})
+
+	cancellation_request.insert(ignore_permissions=True)
